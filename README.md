@@ -17,4 +17,4 @@
 -but the longest time for 1 process to create the 100 frame set was 359 seconds, so multi-processesing definatly made a diffrence
 
 ### graph:
-![Runtime Graph](~/2024sysprogfiles/LAB11/multiprocessing-turney-MLizaka/LAB11GRAPH.png)
+![Runtime Graph](LAB11GRAPH.png)
