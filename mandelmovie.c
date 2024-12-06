@@ -1,116 +1,198 @@
 /**
  * Andrew Lizak
  * FILE: mandlemovie.c
- * Date: 11/25/2024
- * LAB 11
+ * Date: 12/5/2024
+ * LAB 12
  */
 
-
-#include <stdio.h>   
-#include <stdlib.h>  
-#include <unistd.h>  
-#include <sys/types.h> 
-#include <sys/wait.h> 
-#include <math.h>    
-#include <time.h>    
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <math.h>
+#include <time.h>
+#include "jpegrw.h"
 
 // Constants for the animation
-#define FRAMES 100         // Total number of frames to generate
-#define INITIAL_SCALE 4.0  // Initial zoom scale for the Mandelbrot set
-#define FINAL_SCALE 0.0001 // Final zoom scale (very close-up)
-#define INITIAL_X -0.7463  // Starting x-coordinate of zoom
-#define INITIAL_Y 0.1102   // Starting y-coordinate of zoom
-#define FINAL_X -0.7463    // Final x-coordinate (unchanged for this zoom)
-#define FINAL_Y 0.1102     // Final y-coordinate (unchanged for this zoom)
+#define FRAMES 100
+#define INITIAL_SCALE 4.0
+#define FINAL_SCALE 0.0001
+#define INITIAL_X -0.7463
+#define INITIAL_Y 0.1102
+#define FINAL_X -0.7463
+#define FINAL_Y 0.1102
 
-// Function to generate a single frame of the Mandelbrot set
-void generate_frame(int frame, double scale, double x_center, double y_center, int width, int height, const char *out) {
-    // Prepare command-line arguments 
-    char scale_arg[50], x_arg[50], y_arg[50], width_arg[50], height_arg[50];
-    snprintf(scale_arg, sizeof(scale_arg), "-s %lf", scale);  // Scale argument
-    snprintf(x_arg, sizeof(x_arg), "-x %lf", x_center);       // X-coordinate argument
-    snprintf(y_arg, sizeof(y_arg), "-y %lf", y_center);       // Y-coordinate argument
-    snprintf(width_arg, sizeof(width_arg), "-W %d", width);  // Width of the image
-    snprintf(height_arg, sizeof(height_arg), "-H %d", height); // Height of the image
+// Struct to hold data for each thread
+typedef struct {
+    imgRawImage *image;
+    double xmin, xmax, ymin, ymax;
+    int start_row, end_row, max_iterations;
+} thread_data_t;
 
-    // Execute the Mandelbrot gen
-    execlp("./mandel", "mandel", scale_arg, x_arg, y_arg, width_arg, height_arg, "-o", out, (char *)NULL);
-    
-    // If execlp fails, output an error message and exit
-    perror("Error running mandel program");
-    exit(1);
+// Function to calculate the number of iterations for a point in the Mandelbrot set
+int iterations_at_point(double x, double y, int max_iterations) {
+    double zx = 0.0, zy = 0.0;
+    int iterations = 0;
+
+    // Iterate to check if the point escapes the set
+    while ((zx * zx + zy * zy < 4.0) && (iterations < max_iterations)) {
+        double temp = zx * zx - zy * zy + x;
+        zy = 2.0 * zx * zy + y;
+        zx = temp;
+        iterations++;
+    }
+
+    return iterations;
+}
+
+// Function to compute a portion of the image in a separate thread
+void *compute_region(void *arg) {
+    thread_data_t *data = (thread_data_t *)arg;
+    imgRawImage *image = data->image;
+    int width = image->width;
+    int height = image->height;
+
+    // Iterate over the rows assigned to this thread
+    for (int j = data->start_row; j < data->end_row; j++) {
+        for (int i = 0; i < width; i++) {
+            double x = data->xmin + i * (data->xmax - data->xmin) / width;
+            double y = data->ymin + j * (data->ymax - data->ymin) / height;
+            int iters = iterations_at_point(x, y, data->max_iterations);
+            unsigned int color = (iters * 255 / data->max_iterations);
+            setPixelCOLOR(image, i, j, (color << 16) | (color << 8) | color); // Grayscale color
+        }
+    }
+    return NULL;
+}
+
+// Function to compute the entire image, split into multiple threads
+void compute_image(imgRawImage *image, double xmin, double xmax, double ymin, double ymax, int max_iterations, int num_threads) {
+    pthread_t threads[num_threads];
+    thread_data_t thread_data[num_threads];
+
+    int height = image->height;
+    int rows_per_thread = height / num_threads;
+
+    // Create threads to compute different regions of the image
+    for (int t = 0; t < num_threads; t++) {
+        thread_data[t].image = image;
+        thread_data[t].xmin = xmin;
+        thread_data[t].xmax = xmax;
+        thread_data[t].ymin = ymin;
+        thread_data[t].ymax = ymax;
+        thread_data[t].max_iterations = max_iterations;
+        thread_data[t].start_row = t * rows_per_thread;
+        thread_data[t].end_row = (t == num_threads - 1) ? height : (t + 1) * rows_per_thread;
+
+        if (pthread_create(&threads[t], NULL, compute_region, &thread_data[t]) != 0) {
+            perror("Error creating thread");
+            exit(1);
+        }
+    }
+
+    // Wait for all threads to finish
+    for (int t = 0; t < num_threads; t++) {
+        if (pthread_join(threads[t], NULL) != 0) {
+            perror("Error joining thread");
+            exit(1);
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
-    // Check if the user provided the correct number of arguments
-    if (argc != 2) {
-        fprintf(stderr, "enter number of processes only!");
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <num_processes> <num_threads>\n", argv[0]);
         exit(1);
     }
 
-    // Parse the number of processes from the command-line argument
     int num_processes = atoi(argv[1]);
-    if (num_processes < 1 || num_processes > FRAMES) {
-        fprintf(stderr, "Number must be between 1 and %d\n", FRAMES);
+    int num_threads = atoi(argv[2]);
+
+    // Check if the number of processes and threads are within reasonable limits
+    if (num_processes < 1 || num_processes > FRAMES || num_threads < 1 || num_threads > 20) {
+        fprintf(stderr, "Number of processes must be between 1 and %d, and number of threads must be between 1 and 20\n", FRAMES);
         exit(1);
     }
 
-    // Calculate the step sizes 
-    double scale_step = pow(FINAL_SCALE / INITIAL_SCALE, 1.0 / FRAMES); // zoom
-    double x_step = (FINAL_X - INITIAL_X) / FRAMES; // Change in x-coordinate per frame
-    double y_step = (FINAL_Y - INITIAL_Y) / FRAMES; // Change in y-coordinate per frame
+    // Calculate the scaling and movement steps for each frame
+    double scale_step = pow(FINAL_SCALE / INITIAL_SCALE, 1.0 / FRAMES);
+    double x_step = (FINAL_X - INITIAL_X) / FRAMES;
+    double y_step = (FINAL_Y - INITIAL_Y) / FRAMES;
 
-    // first frame vals
     double current_scale = INITIAL_SCALE;
     double current_x = INITIAL_X;
     double current_y = INITIAL_Y;
 
-    // Timer strt
     struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start); 
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    int active_processes = 0; // Tracking the number of active child processes
+    int active_processes = 0;
 
-    // Loop to generate all frames
+    // Loop to generate each frame
     for (int frame = 0; frame < FRAMES; frame++) {
         char outfile[50];
-        snprintf(outfile, sizeof(outfile), "frame%03d.jpg", frame + 1); // Create output filename
+        snprintf(outfile, sizeof(outfile), "frame%03d.jpg", frame + 1);
 
-        // If we've reached the max number of processes, wait for one to finish
+        // Wait for a process to finish if we've hit the process limit
         if (active_processes >= num_processes) {
-            wait(NULL); // Wait for any child process to complete
-            active_processes--; // Decrement active process count
+            wait(NULL);
+            active_processes--;
         }
 
-        // Fork a new process to make frame
         pid_t pid = fork();
         if (pid < 0) {
             perror("Error during fork");
-            exit(1); // Exit if fork fails
+            exit(1);
         } else if (pid == 0) {
-            // Child process: generate the frame
-            generate_frame(frame, current_scale, current_x, current_y, 1000, 1000, outfile);
+            // Child process: generate the image for this frame
+            printf("Child process generating frame %d\n", frame);
+            imgRawImage *image = initRawImage(1000, 1000);
+            if (!image) {
+                fprintf(stderr, "Failed to create image for frame %d\n", frame);
+                exit(1);
+            }
+
+            compute_image(image, current_x - current_scale, current_x + current_scale,
+                          current_y - current_scale, current_y + current_scale,
+                          1000, num_threads);
+
+            if (storeJpegImageFile(image, outfile) != 0) {
+                fprintf(stderr, "Failed to save image for frame %d\n", frame);
+                freeRawImage(image);
+                exit(1);
+            }
+
+            freeRawImage(image);
+            exit(0);
         } else {
-            // Parent process: increment the active process count
+            // Parent process: track active processes
+            printf("Parent process, active_processes: %d\n", active_processes);
             active_processes++;
         }
 
-        // val for next frame
-        current_scale *= scale_step; // Zoom in
-        current_x += x_step;         // Update x-coordinate
-        current_y += y_step;         // Update y-coordinate
+        // Update the scale and position for the next frame
+        current_scale *= scale_step;
+        current_x += x_step;
+        current_y += y_step;
+
+        // Wait for a process to finish if needed
+        if (active_processes >= num_processes) {
+            wait(NULL);
+            active_processes--;
+        }
     }
 
-    // dont abandon your children 
+    // Wait for any remaining child processes to finish
     while (active_processes > 0) {
         wait(NULL);
         active_processes--;
     }
 
-    // stop timer and print result 
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Completed in %.9f seconds.\n", elapsed_time);
+    printf("Generation completed in %.9f seconds.\n", elapsed_time);
 
-    return 0; //the end
+    return 0;
 }
