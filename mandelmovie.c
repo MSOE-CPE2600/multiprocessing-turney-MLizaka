@@ -16,7 +16,7 @@
 #include "jpegrw.h"
 
 // Constants for the animation
-#define FRAMES 100
+#define FRAMES 50
 #define INITIAL_SCALE 4.0
 #define FINAL_SCALE 0.0001
 #define INITIAL_X -0.7463
